@@ -16,10 +16,15 @@ struct TranscriptItem {
 }
 
 impl TranscriptItem {
+    // This method formats the timestamp of a transcript item into a readable string
+    // It takes the start time in seconds and converts it to [MM:SS] format
+    // For example: 
+    // - If start time is 65.0 seconds, returns "[01:05]"
+    // - If start time is 125.5 seconds, returns "[02:05]"
     fn format_time(&self) -> String {
-        let start_mins = (self.start / 60.0).floor();
-        let start_secs = (self.start % 60.0).floor();
-        format!("[{:02}:{:02}]", start_mins, start_secs)
+        let start_mins = (self.start / 60.0).floor(); // Convert seconds to minutes
+        let start_secs = (self.start % 60.0).floor(); // Get remaining seconds
+        format!("[{:02}:{:02}]", start_mins, start_secs) // Format as [MM:SS]
     }
 }
 
@@ -103,18 +108,92 @@ async fn get_transcript(video_id: &str) -> Result<Vec<TranscriptItem>, Box<dyn E
 }
 
 fn save_transcript(transcript: &[TranscriptItem], video_id: &str) -> Result<(), Box<dyn Error>> {
-    let output = transcript.iter()
+    // First convert TranscriptItems to the format we need
+    let content = transcript.iter()
         .map(|item| format!("{} {}", item.format_time(), item.text))
         .collect::<Vec<_>>()
         .join("\n");
 
-    fs::write(format!("transcript_{}.txt", video_id), output)?;
+    // Normalize the timestamps
+    let normalized = normalize_timestamps(&content);
+
+    // Save the normalized version
+    fs::write(format!("transcript_{}.txt", video_id), normalized)?;
     Ok(())
 }
 
+fn process_timestamp_line(line: &str) -> Option<(f64, String)> {
+    if let Some(timestamp_end) = line.find(']') {
+        if line.starts_with('[') {
+            let timestamp_str = &line[1..timestamp_end];
+            let text = line[timestamp_end + 1..].trim().to_string();
+            
+            // Convert timestamp to seconds
+            if let Some((minutes, seconds)) = timestamp_str.split_once(':') {
+                if let (Ok(min), Ok(sec)) = (minutes.parse::<f64>(), seconds.parse::<f64>()) {
+                    return Some((min * 60.0 + sec, text));
+                }
+            }
+        }
+    }
+    None
+}
+
+// Normalize timestamps
+#[allow(unused_mut)]
+fn normalize_timestamps(content: &str) -> String {
+    let mut normalized = String::new();
+    let mut current_timestamp = 0;
+    let interval = 6; // 6-second intervals
+    
+    // Process each line and collect timestamps and text
+    let mut entries: Vec<(f64, String)> = content
+        .lines()
+        .filter_map(process_timestamp_line)
+        .collect();
+    
+    // Sort by timestamp if needed
+    entries.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    
+    // Group text into 6-second intervals
+    while current_timestamp <= (entries.last().map(|e| e.0).unwrap_or(0.0) as i32) {
+        let start_time = current_timestamp as f64;
+        let end_time = (current_timestamp + interval) as f64;
+        
+        let text: String = entries
+            .iter()
+            .filter(|(ts, _)| *ts >= start_time && *ts < end_time)
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        
+        if !text.is_empty() {
+            let minutes = current_timestamp / 60;
+            let seconds = current_timestamp % 60;
+            normalized.push_str(&format!("[{}:{:02}] {}\n", minutes, seconds, text));
+        }
+        
+        current_timestamp += interval;
+    }
+    
+    normalized
+}
+// Timstamp line end
+
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Read config file
+    // First, let's normalize any existing transcripts if specified
+    if let Ok(content) = std::fs::read_to_string("transcript_RcYjXbSJBN8.txt") {
+        println!("Normalizing existing transcript...");
+        let normalized = normalize_timestamps(&content);
+        println!("Normalized transcript:");
+        println!("{}", normalized);
+        // Optionally save the normalized version
+        fs::write("transcript_RcYjXbSJBN8_normalized.txt", normalized)?;
+    }
+
+    // Then proceed with the original main function logic
     let config_text = fs::read_to_string("config.json")
         .expect("Failed to read config.json. Make sure it exists in the project root.");
     
